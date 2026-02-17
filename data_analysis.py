@@ -10,17 +10,18 @@ st.set_page_config(
     page_title="Análise de Turnover - IBM HR Attrition",
     layout="wide",
     initial_sidebar_state="expanded",
-    page_icon="./images/ibm_logo.png",  # Certifique-se de que o arquivo existe
+    page_icon="./images/ibm_logo.png",
 )
 
 # ===================== VARIÁVEIS DE SESSÃO =====================
 session_defaults = {
     "data": None,
-    "target_col": "Attrition",  # coluna alvo padrão
-    "categorical_cols": [],  # lista de colunas categóricas do dataset
-    "numerical_cols": [],  # lista de colunas numéricas do dataset
-    "selected_categorical": [],  # seleção do usuário
-    "selected_numerical": [],  # seleção do usuário
+    "target_col": "Attrition",
+    "categorical_cols": [],
+    "numerical_cols": [],
+    "selected_categorical": [],
+    "selected_numerical": [],
+    "cat_threshold": 10,  # 🔹 Novo: limiar para considerar numérica como categórica
 }
 
 for key, value in session_defaults.items():
@@ -40,13 +41,26 @@ def load_data(uploaded_file):
         return None
 
 
-def infer_column_types(df, target_col):
+def infer_column_types(df, target_col, cat_threshold=10):
     """
     Infere colunas categóricas e numéricas, excluindo a coluna alvo.
+    Colunas numéricas com número de valores únicos <= cat_threshold
+    são movidas para categóricas.
     Retorna duas listas.
     """
+    # Separa por tipo bruto
     categorical = df.select_dtypes(include=["object", "category"]).columns.tolist()
     numerical = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    # Para cada coluna numérica, verifica cardinalidade
+    low_card_num = []
+    for col in numerical[:]:  # itera sobre cópia
+        if df[col].nunique() <= cat_threshold:
+            low_card_num.append(col)
+            numerical.remove(col)
+
+    # Adiciona as de baixa cardinalidade às categóricas
+    categorical.extend(low_card_num)
 
     # Remove target de ambas (se estiver presente)
     if target_col in categorical:
@@ -58,19 +72,13 @@ def infer_column_types(df, target_col):
 
 
 def convert_target_to_binary(df, target_col, positive_value):
-    """
-    Converte a coluna alvo para 0/1 com base no valor positivo escolhido.
-    A coluna é modificada inplace.
-    """
+    """Converte a coluna alvo para 0/1 com base no valor positivo escolhido."""
     df[target_col] = df[target_col].apply(lambda x: 1 if x == positive_value else 0)
     return df
 
 
 def calculate_attrition_proportions(df, group_col, target_col):
-    """
-    Calcula contagens e proporções de attrition para uma coluna categórica.
-    Retorna um DataFrame com colunas: group_col, target_col, Contagem, Total, Proporcao.
-    """
+    """Calcula contagens e proporções de attrition para uma coluna categórica."""
     counts = df.groupby([group_col, target_col]).size().reset_index(name="Contagem")
     totals = df.groupby(group_col).size().reset_index(name="Total")
     merged = counts.merge(totals, on=group_col)
@@ -99,7 +107,6 @@ def plot_attrition_proportions(
     ax.set_ylim(0, 1)
     ax.tick_params(axis="x", rotation=45)
 
-    # Rótulos percentuais
     for container in ax.containers:
         for bar in container:
             height = bar.get_height()
@@ -117,21 +124,15 @@ def plot_attrition_proportions(
 
 
 def plot_normalized_distribution(df, continuous_var, target_col, bins=30):
-    """
-    Plota distribuição normalizada (KDE e histograma de proporções) de uma variável contínua.
-    Retorna a figura matplotlib.
-    """
+    """Plota distribuição normalizada (KDE e histograma de proporções)."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Dados separados
     stay = df[df[target_col] == 0][continuous_var].dropna()
     leave = df[df[target_col] == 1][continuous_var].dropna()
-
-    # Estatísticas
     stay_mean = stay.mean()
     leave_mean = leave.mean()
 
-    # 1. KDE normalizado
+    # KDE
     axes[0].set_title(
         f"Densidade Normalizada: {continuous_var} por Turnover",
         fontsize=14,
@@ -174,7 +175,7 @@ def plot_normalized_distribution(df, continuous_var, target_col, bins=30):
     axes[0].legend(loc="best")
     axes[0].grid(True, alpha=0.3)
 
-    # 2. Histograma de proporções (stacked)
+    # Histograma de proporções
     axes[1].set_title(
         f"Proporção por Faixa: {continuous_var}", fontsize=14, fontweight="bold"
     )
@@ -231,7 +232,6 @@ def plot_normalized_distribution(df, continuous_var, target_col, bins=30):
 
     plt.tight_layout()
 
-    # Estatísticas adicionais como texto
     stats_text = (
         f"Estatísticas - {continuous_var}:\n"
         f"• Total Ficam: {len(stay):,} ({len(stay)/len(df):.1%})\n"
@@ -252,17 +252,12 @@ def plot_normalized_distribution(df, continuous_var, target_col, bins=30):
 
 
 def plot_absolute_distributions(df, numerical_vars, target_col):
-    """
-    Cria uma grade de subplots para variáveis numéricas (modo absoluto).
-    Para variáveis com poucos valores únicos (<10), usa gráfico de barras de proporção.
-    Caso contrário, usa violinplot.
-    """
+    """Cria uma grade de subplots para variáveis numéricas (modo absoluto)."""
     n_cols = 4
     n_vars = len(numerical_vars)
     n_rows = (n_vars + n_cols - 1) // n_cols
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 5 * n_rows))
 
-    # Achatar axes se necessário
     if n_rows == 1 and n_cols == 1:
         axes = [axes]
     else:
@@ -271,7 +266,6 @@ def plot_absolute_distributions(df, numerical_vars, target_col):
     for idx, var in enumerate(numerical_vars):
         ax = axes[idx]
         if df[var].nunique() < 10:
-            # Tratar como categórica ordinal
             props = calculate_attrition_proportions(df, var, target_col)
             sns.barplot(
                 data=props,
@@ -285,7 +279,6 @@ def plot_absolute_distributions(df, numerical_vars, target_col):
             ax.set_xlabel(var)
             ax.set_ylabel("Proporção")
             ax.tick_params(axis="x", rotation=45)
-            # Rótulos percentuais
             for container in ax.containers:
                 for bar in container:
                     height = bar.get_height()
@@ -306,7 +299,6 @@ def plot_absolute_distributions(df, numerical_vars, target_col):
             ax.set_xlabel(f"{target_col} (0 = Não, 1 = Sim)")
             ax.set_ylabel(var)
 
-    # Remove eixos não utilizados
     for j in range(len(numerical_vars), len(axes)):
         fig.delaxes(axes[j])
 
@@ -319,7 +311,6 @@ def main():
     # Cabeçalho com imagem
     try:
         img = Image.open("./images/office.jpg")
-        # Redimensionar mantendo proporção
         max_height = 500
         if img.height > max_height:
             new_height = max_height
@@ -329,7 +320,7 @@ def main():
         with col2:
             st.image(img, use_container_width=False)
     except FileNotFoundError:
-        pass  # imagem opcional
+        pass
 
     # Barra lateral
     with st.sidebar:
@@ -349,7 +340,7 @@ def main():
                 st.write("**Primeiras linhas:**")
                 st.dataframe(df.head())
 
-                # Permitir selecionar a coluna alvo
+                # Selecionar coluna alvo
                 all_cols = df.columns.tolist()
                 target = st.selectbox(
                     "Selecione a coluna alvo (turnover)",
@@ -370,12 +361,10 @@ def main():
                 ):
                     unique_vals = target_series.unique()
                     if len(unique_vals) == 2:
-                        # Perguntar ao usuário qual valor representa turnover (1)
                         positive_val = st.selectbox(
                             f"Qual valor em '{target}' indica turnover?",
                             options=unique_vals,
                         )
-                        # Mapear: positivo -> 1, outro -> 0
                         df[target] = df[target].apply(
                             lambda x: 1 if x == positive_val else 0
                         )
@@ -388,29 +377,69 @@ def main():
                         )
                         st.stop()
                 else:
-                    # Se já é numérica, verificar se contém apenas 0 e 1
                     unique_vals = target_series.unique()
                     if set(unique_vals) not in ({0, 1}, {0}, {1}):
                         st.warning(
                             f"A coluna alvo numérica contém valores diferentes de 0 e 1: {unique_vals}. Certifique-se de que 1 indica turnover."
                         )
 
-                # Atualizar o dataframe na sessão com a coluna convertida
                 st.session_state.data = df
 
-                # Inferir tipos
-                cat_cols, num_cols = infer_column_types(df, target)
+                # 🔹 NOVO: Slider para limiar de cardinalidade
+                st.markdown("---")
+                st.header("2. Configurar classificação")
+                cat_threshold = st.slider(
+                    "Limiar de cardinalidade para variáveis categóricas",
+                    min_value=2,
+                    max_value=50,
+                    value=st.session_state.cat_threshold,
+                    step=1,
+                    help="Colunas numéricas com número de valores únicos ≤ este limiar serão tratadas como categóricas.",
+                )
+                st.session_state.cat_threshold = cat_threshold
+
+                # 🔹 Reclassificar com base no limiar atual
+                cat_cols, num_cols = infer_column_types(
+                    df, target, cat_threshold=cat_threshold
+                )
                 st.session_state.categorical_cols = cat_cols
                 st.session_state.numerical_cols = num_cols
 
+                # 🔹 Mostrar resumo da classificação
+                st.write(f"**Categóricas:** {len(cat_cols)} variáveis")
+                st.write(f"**Numéricas:** {len(num_cols)} variáveis")
+                if cat_cols:
+                    with st.expander("Ver lista de categóricas"):
+                        st.write(cat_cols)
+                if num_cols:
+                    with st.expander("Ver lista de numéricas"):
+                        st.write(num_cols)
+
                 st.markdown("---")
-                st.header("2. Selecionar variáveis")
-                st.session_state.selected_categorical = st.multiselect(
-                    "Variáveis categóricas para análise", options=cat_cols, default=[]
+                st.header("3. Selecionar variáveis para análise")
+
+                # 🔹 Multiselect para categóricas (apenas opções categóricas)
+                selected_cat = st.multiselect(
+                    "Variáveis categóricas",
+                    options=cat_cols,
+                    default=[
+                        v
+                        for v in st.session_state.selected_categorical
+                        if v in cat_cols
+                    ],  # mantém apenas as que ainda existem
                 )
-                st.session_state.selected_numerical = st.multiselect(
-                    "Variáveis numéricas para análise", options=num_cols, default=[]
+                st.session_state.selected_categorical = selected_cat
+
+                # 🔹 Multiselect para numéricas (apenas opções numéricas)
+                selected_num = st.multiselect(
+                    "Variáveis numéricas",
+                    options=num_cols,
+                    default=[
+                        v for v in st.session_state.selected_numerical if v in num_cols
+                    ],
                 )
+                st.session_state.selected_numerical = selected_num
+
             else:
                 st.session_state.data = None
         else:
@@ -420,7 +449,6 @@ def main():
     # Título principal
     st.title("Análise de Turnover - IBM HR Employee Attrition")
 
-    # Verificar se dados foram carregados
     if st.session_state.data is None:
         st.warning("Por favor, carregue um arquivo CSV na barra lateral.")
         return
@@ -477,9 +505,7 @@ def main():
                     )
                     st.pyplot(fig)
 
-                    # Análise de quartis
                     st.markdown("##### Risco por quartil")
-                    # Criar cópia temporária para não modificar original
                     temp_df = st.session_state.data.copy()
                     try:
                         temp_df["quartil"] = pd.qcut(
@@ -488,7 +514,6 @@ def main():
                             labels=["Q1 (Baixo)", "Q2", "Q3", "Q4 (Alto)"],
                         )
                     except ValueError:
-                        # Fallback para dados com muitos valores repetidos
                         quartiles = temp_df[var].quantile([0.25, 0.5, 0.75])
                         bins = [-float("inf")] + quartiles.tolist() + [float("inf")]
                         labels = ["Q1 (Baixo)", "Q2", "Q3", "Q4 (Alto)"]
@@ -504,7 +529,6 @@ def main():
                     risk.columns = ["Quartil", "Taxa de Turnover"]
                     risk["Risco Relativo"] = risk["Taxa de Turnover"] / overall_rate
 
-                    # Formatar para exibição
                     st.dataframe(
                         risk.style.format(
                             {"Taxa de Turnover": "{:.1%}", "Risco Relativo": "{:.2f}x"}
